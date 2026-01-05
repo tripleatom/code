@@ -4,28 +4,31 @@ import scipy.io
 import h5py
 from datetime import datetime
 from pathlib import Path
-from spikeinterface import load_sorting_analyzer
 from spikeinterface.extractors import PhySortingExtractor
 from rec2nwb.preproc_func import parse_session_info
 from rf_recon.rf_func import dereference
+import pickle
 
-def process_static_grating_responses(rec_folder, stimdata_file, peaks_file, overwrite=True):
+
+def process_drifting_grating_responses(rec_folder, stimdata_file, peaks_file, overwrite=True):
     """
-    Process static grating responses from an experiment folder.
+    Process drifting grating responses from an experiment folder.
     
     The function:
       - Loads stimulus and timing information from MAT/HDF5 files,
       - Stores spike times for each trial with pre-stimulus and post-stimulus periods
-      - Organizes trial information in a structured format
-      - Saves detailed trial-by-trial data into an NPZ file
+      - Organizes trial information in a structured format matching the embedding extractor schema
+      - Saves detailed trial-by-trial data into a PKL file
     
     Parameters:
-      experiment_folder (str or Path): Path to the experiment folder.
-      overwrite (bool): If False and the NPZ file already exists, skip writing. 
-                        If True, overwrite any existing NPZ file.
+      rec_folder (str or Path): Path to the experiment folder.
+      stimdata_file (str or Path): Path to the stimulus data MAT/HDF5 file.
+      peaks_file (str or Path): Path to the peaks MAT file.
+      overwrite (bool): If False and the PKL file already exists, skip writing. 
+                        If True, overwrite any existing PKL file.
     
     Returns:
-      npz_file (Path): Path to the saved (or existing) NPZ file.
+      pkl_file (Path): Path to the saved (or existing) PKL file.
     """
     stim_str = str(stimdata_file)
     timestamp_str = stim_str.split('_')[-2] + '_' + stim_str.split('_')[-1].split('.')[0]
@@ -36,13 +39,11 @@ def process_static_grating_responses(rec_folder, stimdata_file, peaks_file, over
     peaks_data = scipy.io.loadmat(peaks_file, struct_as_record=False, squeeze_me=True)
     rising_edges = peaks_data['locs']
     
-    
     # Parse session info (animal_id, session_id, folder_name)
     animal_id, session_id, folder_name = parse_session_info(rec_folder)
     ishs = ['0', '1', '2', '3', '4', '5', '6', '7']  # Assuming 8 shanks
     
     # Open the Stimdata file to get stimulus parameters
-
     with h5py.File(stimdata_file, 'r') as f:
         patternParams_group = f['Stimdata']['movieParams']
         
@@ -66,7 +67,6 @@ def process_static_grating_responses(rec_folder, stimdata_file, peaks_file, over
     print("Spatial Frequency:", stim_spatialFreq)
     print("Temporal Frequency:", stim_temporalFreq)
 
-
     # Determine the number of drifting grating stimuli and extract the corresponding rising edges
     n_drifting_grating = stim_orientation.shape[0]
     print(f"Number of drifting grating stimuli: {n_drifting_grating}")
@@ -87,22 +87,21 @@ def process_static_grating_responses(rec_folder, stimdata_file, peaks_file, over
     n_repeats = n_drifting_grating // (n_orientation * n_phase * n_spatialFreq * n_temporalFreq)
 
     # Define time windows (in seconds)
-    pre_stim_window = 0.05    # 50ms before stimulus
+    pre_stim_window = 0.2    # 50ms before stimulus
     post_stim_window = t_trial   # duration of the trial
     
-    all_units_data = []
-    unit_info = []
-    all_unit_qualities = []
-    
     # Construct session folder for sorting results
-    code_folder = Path(__file__).parent.parent.parent
-    session_folder = code_folder / rf"sortout/{animal_id}/{animal_id}_{session_id}"
+    project_folder = Path(__file__).parent.parent.parent.parent
+    session_folder = project_folder / rf"sortout/{animal_id}/{animal_id}_{session_id}"
     
     # Check if the output file already exists
-    npz_file = session_folder / f'drifting_grating_responses_{dt_object.strftime("%Y%m%d_%H%M")}.npz'
-    if npz_file.exists() and not overwrite:
-        print(f"File {npz_file} already exists and overwrite=False. Skipping computation and returning existing file.")
-        return npz_file
+    pkl_file = session_folder / f'drifting_grating_embedding_{dt_object.strftime("%Y%m%d_%H%M")}.pkl'
+    if pkl_file.exists() and not overwrite:
+        print(f"File {pkl_file} already exists and overwrite=False. Skipping computation and returning existing file.")
+        return pkl_file
+    
+    all_units_data = []
+    fs = None  # Will be set from first valid sorting
     
     for ish in ishs:
         print(f'Processing {animal_id}/{session_id}/{ish}')
@@ -115,17 +114,14 @@ def process_static_grating_responses(rec_folder, stimdata_file, peaks_file, over
         
         for sorting_results_folder in sorting_results_folders:
             phy_folder = Path(sorting_results_folder) / 'phy'
-            out_fig_folder = Path(sorting_results_folder) / 'drifting_grating'
-            if not out_fig_folder.exists():
-                out_fig_folder.mkdir(parents=True)
             
-            # Load sorting analyzer (optionally use curated data)
-            # sorting_anaylzer = load_sorting_analyzer(Path(sorting_results_folder) / 'sorting_analyzer')
-            # sorting = sorting_anaylzer.sorting
+            # Load sorting
             sorting = PhySortingExtractor(phy_folder)
             unit_ids = sorting.unit_ids
             unit_qualities_this_sort = sorting.get_property('quality')
-            fs = sorting.sampling_frequency
+            
+            if fs is None:
+                fs = sorting.sampling_frequency
             
             for i, unit_id in enumerate(unit_ids):
                 spike_train = sorting.get_unit_spike_train(unit_id)
@@ -134,6 +130,8 @@ def process_static_grating_responses(rec_folder, stimdata_file, peaks_file, over
                 unit_data = {
                     'unit_id': unit_id,
                     'shank': ish,
+                    'quality': unit_qualities_this_sort[i],
+                    'sorting_folder': str(sorting_results_folder),
                     'sampling_rate': fs,
                     'trials': []
                 }
@@ -181,6 +179,7 @@ def process_static_grating_responses(rec_folder, stimdata_file, peaks_file, over
                         'orientation': trial_orientation,
                         'phase': trial_phase,
                         'spatial_frequency': trial_spatialFreq,
+                        'temporal_frequency': trial_temporalFreq,
                         'orientation_idx': ori_idx,
                         'phase_idx': phase_idx,
                         'spatial_freq_idx': sf_idx,
@@ -198,78 +197,167 @@ def process_static_grating_responses(rec_folder, stimdata_file, peaks_file, over
                     unit_data['trials'].append(trial_info)
                 
                 all_units_data.append(unit_data)
-                unit_info.append((ish, unit_id))
-                all_unit_qualities.append(unit_qualities_this_sort[i])
     
     print(f"Processed {len(all_units_data)} units across {len(rising_edges)} trials")
     
-    # Create summary statistics
-    summary_stats = {
-        'n_units': len(all_units_data),
-        'n_trials': len(rising_edges),
-        'n_orientation': n_orientation,
-        'n_phase': n_phase,
-        'n_spatialFreq': n_spatialFreq,
-        'n_repeats': n_repeats,
-        'pre_stim_window': pre_stim_window,
-        'post_stim_window': post_stim_window,
-    }
-    
-    # Save the data to an NPZ file in the session folder
-    print(f"Saving data to {npz_file} (overwrite={overwrite})")
-    np.savez(
-        npz_file,
-        # Original data structure (for backwards compatibility)
-        unit_info=unit_info,
-        unit_qualities=all_unit_qualities,
+    # Save the data to a PKL file using the unified schema
+    save_drifting_grating_to_pkl(
+        animal_id=animal_id,
+        session_id=session_id,
+        rec_folder=rec_folder,
+        stimdata_file=stimdata_file,
+        fs=fs,
+        rising_edges=rising_edges,
         stim_orientation=stim_orientation,
         stim_phase=stim_phase,
         stim_spatialFreq=stim_spatialFreq,
+        stim_temporalFreq=stim_temporalFreq,
         unique_orientation=unique_orientation,
         unique_phase=unique_phase,
         unique_spatialFreq=unique_spatialFreq,
-        rising_edges=rising_edges,
-        
-        # New structured data
-        units_data=all_units_data,
-        summary_stats=summary_stats,
-        
-        # Timing parameters
+        unique_temporalFreq=unique_temporalFreq,
+        n_repeats=n_repeats,
         pre_stim_window=pre_stim_window,
         post_stim_window=post_stim_window,
+        all_units_data=all_units_data,
+        output_path=pkl_file,
     )
-    print("Data saved with detailed trial structure")
-    return npz_file
+
+    return pkl_file
 
 
-def load_and_analyze_static_grating_data(npz_file):
+def save_drifting_grating_to_pkl(
+    *,
+    animal_id,
+    session_id,
+    rec_folder,
+    stimdata_file,
+    fs,
+    rising_edges,
+    stim_orientation,
+    stim_phase,
+    stim_spatialFreq,
+    stim_temporalFreq,
+    unique_orientation,
+    unique_phase,
+    unique_spatialFreq,
+    unique_temporalFreq,
+    n_repeats,
+    pre_stim_window,
+    post_stim_window,
+    all_units_data,
+    output_path,
+):
     """
-    Helper function to load and explore the saved data structure.
+    Save drifting grating responses in the SAME schema as the embedding extractor.
+    This ensures compatibility with downstream analysis code.
     """
-    data = np.load(npz_file, allow_pickle=True)
     
-    units_data = data['units_data']
-    summary_stats = data['summary_stats'].item()
+    # Create trial windows (using rising edges as both start and end for compatibility)
+    trial_windows = [(int(edge), int(edge)) for edge in rising_edges]
     
-    print("Summary Statistics:")
-    for key, value in summary_stats.items():
-        print(f"  {key}: {value}")
+    # Build all trial parameters list
+    all_trial_parameters = []
+    for trial_idx in range(len(rising_edges)):
+        trial_params = {
+            'trial_index': trial_idx,
+            'orientation': float(stim_orientation[trial_idx]),
+            'phase': float(stim_phase[trial_idx]),
+            'spatial_frequency': float(stim_spatialFreq[trial_idx]),
+            'temporal_frequency': float(stim_temporalFreq[trial_idx]),
+        }
+        all_trial_parameters.append(trial_params)
     
-    print(f"\nFirst unit example:")
-    first_unit = units_data[0]
-    print(f"  Unit ID: {first_unit['unit_id']}")
-    print(f"  Shank: {first_unit['shank']}")
-    print(f"  Number of trials: {len(first_unit['trials'])}")
+    # Initialize the unified data structure
+    neural_data = {
+        'metadata': {
+            'animal_id': animal_id,
+            'session_id': session_id,
+            'recording_folder': str(rec_folder),
+            'task_file': str(stimdata_file),
+            'extraction_date': datetime.now().isoformat(),
+            'n_trials': len(rising_edges),
+            'experiment_type': 'drifting_grating',
+            'sampling_frequency': fs,
+        },
+        'experiment_parameters': {
+            'stimulus_duration': float(post_stim_window),
+            'iti_duration': None,  # Not applicable for this experiment type
+            'trial_duration': float(post_stim_window),
+            'total_trials': len(rising_edges),
+            'n_orientations': len(unique_orientation),
+            'n_phases': len(unique_phase),
+            'n_spatial_frequencies': len(unique_spatialFreq),
+            'n_temporal_frequencies': len(unique_temporalFreq),
+            'n_repeats': n_repeats,
+        },
+        'trial_info': {
+            'orientations': stim_orientation.tolist(),
+            'unique_orientations': unique_orientation.tolist(),
+            'phases': stim_phase.tolist(),
+            'unique_phases': unique_phase.tolist(),
+            'spatial_frequencies': stim_spatialFreq.tolist(),
+            'unique_spatial_frequencies': unique_spatialFreq.tolist(),
+            'temporal_frequencies': stim_temporalFreq.tolist(),
+            'unique_temporal_frequencies': unique_temporalFreq.tolist(),
+            'trial_windows': trial_windows,
+            'all_trial_parameters': all_trial_parameters,
+        },
+        'spike_data': {},
+        'unit_info': {},
+        'extraction_params': {
+            'window_pre': pre_stim_window,
+            'window_post': post_stim_window,
+            'total_units': len(all_units_data),
+        }
+    }
     
-    first_trial = first_unit['trials'][0]
-    print(f"\nFirst trial example:")
-    for key, value in first_trial.items():
-        if key in ['spike_times', 'pre_stim_spikes', 'stim_spikes']:
-            print(f"  {key}: {len(value)} spikes")
-        else:
-            print(f"  {key}: {value}")
+    # Populate spike_data and unit_info in the unified format
+    unit_counter = 0
     
-    return data
+    for unit in all_units_data:
+        # Create unique unit identifier matching the embedding extractor format
+        unique_unit_id = f"shank{unit['shank']}_unit{unit['unit_id']}"
+        
+        # Store unit metadata
+        neural_data['unit_info'][unique_unit_id] = {
+            'original_unit_id': int(unit['unit_id']),
+            'shank': unit['shank'],
+            'quality': unit.get('quality', 'unknown'),
+            'sorting_folder': unit.get('sorting_folder', ''),
+            'n_spikes_total': sum(len(t['spike_times']) for t in unit['trials']),
+            'unit_index': unit_counter,
+        }
+        
+        # Store spike data for each trial
+        trials_out = []
+        for t in unit['trials']:
+            trial_data = {
+                'trial_index': t['trial_number'],
+                'orientation': t['orientation'],
+                'phase': t.get('phase'),
+                'spatial_frequency': t.get('spatial_frequency'),
+                'temporal_frequency': t.get('temporal_frequency'),
+                'spike_times': t['spike_times'].tolist(),
+                'spike_count': len(t['spike_times']),
+                'trial_start': t['stimulus_onset_time'],
+                'trial_end': t['stimulus_onset_time'],  # Same as start for compatibility
+                # Additional metrics preserved for analysis
+                'pre_stim_count': t.get('pre_stim_count'),
+                'post_stim_count': t.get('post_stim_count'),
+                'firing_rate_pre': t.get('firing_rate_pre'),
+                'firing_rate_post': t.get('firing_rate_post'),
+            }
+            trials_out.append(trial_data)
+        
+        neural_data['spike_data'][unique_unit_id] = trials_out
+        unit_counter += 1
+    
+    print(f"Saving unified PKL format → {output_path}")
+    with open(output_path, 'wb') as f:
+        pickle.dump(neural_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+    
+    return output_path
 
 
 # Example usage:
@@ -279,6 +367,17 @@ if __name__ == '__main__':
     peaks_file = Path(input("Please enter the full path to the peaks_xx.mat file: ").strip().strip('"'))
 
     # Process the data
-    npz_path = process_static_grating_responses(rec_folder, stimdata_file, peaks_file, overwrite=True)
+    pkl_path = process_drifting_grating_responses(rec_folder, stimdata_file, peaks_file, overwrite=True)
 
-    print(f"Data saved to: {npz_path}")
+    print(f"Data saved to: {pkl_path}")
+    
+    # Load and verify the structure
+    with open(pkl_path, 'rb') as f:
+        data = pickle.load(f)
+    
+    print("\nData structure verification:")
+    print(f"- Metadata keys: {list(data['metadata'].keys())}")
+    print(f"- Experiment type: {data['metadata']['experiment_type']}")
+    print(f"- Total units: {len(data['spike_data'])}")
+    print(f"- Total trials: {data['metadata']['n_trials']}")
+    print(f"- Unique orientations: {data['trial_info']['unique_orientations']}")

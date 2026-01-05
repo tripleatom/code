@@ -4,10 +4,14 @@ import matplotlib.pyplot as plt
 import pickle
 
 # === CONFIGURATION ===
-rec_folder = r"\\10.129.151.108\xieluanlabs\xl_cl\ephys\sleep\CnL39SG\CnL39SG_20251102_210043.rec"
+# === CONFIGURATION ===
+rec_folder = r"D:\cl\ephys\sleep\CnL42SG_20251112_170949.rec"
+session_name = Path(rec_folder).stem.split('.')[0]
+shanks = [0, 1, 2, 3, 4, 5, 6, 7]  # Loop through multiple shanks
+# rec_folder = r"\\10.129.151.108\xieluanlabs\xl_cl\ephys\sleep\CnL39SG\CnL39SG_20251102_210043.rec"
 rec_folder = Path(rec_folder)  # Convert to Path object
-session_name = rec_folder.stem.split('.')[0]
-shanks = [0,1,2,3]
+# session_name = rec_folder.stem.split('.')[0]
+# shanks = [0,1,2,3]
 fs = 30000  # Original sampling rate
 
 # === PLOTTING PARAMETERS ===
